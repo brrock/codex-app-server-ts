@@ -376,14 +376,4 @@ const client = await CodexClient.create({
 
 ## TypeScript Types
 
-The library re-exports all Codex schemas:
-
-```typescript
-import type {
-  ClientInfo,
-  InitializeCapabilities,
-  ThreadStartParams,
-  TurnStartParams,
-  ServerNotification,
-} from "codex-app-server-ts";
-```
+This lib is well types but you can get more codex types, by generating them with the cli
