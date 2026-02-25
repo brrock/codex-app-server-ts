@@ -16,11 +16,22 @@ export interface CodexClientOptions {
 
 export type ConnectionState = "idle" | "starting" | "ready" | "disconnected" | "error";
 
+export interface ToolCall {
+  id: string;
+  type: "mcp" | "command" | "dynamic";
+  name: string;
+  arguments?: any;
+  result?: any;
+  status: "started" | "completed" | "error";
+  duration?: string;
+}
+
 export interface TurnResult {
   turnId: string;
   status: string;
   text: string;
   final: boolean;
+  toolCall?: ToolCall;
 }
 
 export interface CodexError extends Error {
@@ -34,6 +45,11 @@ type EventMap = {
   turnCompleted: [any];
   message: [any];
   error: [CodexError];
+  toolCallStarted: [ToolCall];
+  toolCallCompleted: [ToolCall];
+  messageDelta: [string];
+  commandOutput: [string];
+  approvalRequest: [any];
 };
 
 type EventKey = keyof EventMap;
@@ -65,9 +81,27 @@ export class CodexStream implements AsyncIterable<TurnResult> {
   private status = "";
   private resolved = false;
   private waiters: Array<(value: TurnResult) => void> = [];
+  private tools: Map<string, ToolCall> = new Map();
+  private toolWaiters: Array<(value: ToolCall) => void> = [];
 
   constructor(client: CodexClient) {
     this.client = client;
+  }
+
+  get toolCalls(): ToolCall[] {
+    return Array.from(this.tools.values());
+  }
+
+  getTool(id: string): ToolCall | undefined {
+    return this.tools.get(id);
+  }
+
+  onToolCall(callback: (tool: ToolCall) => void): void {
+    this.toolWaiters.push(callback);
+    // Emit existing tools
+    for (const tool of this.tools.values()) {
+      callback(tool);
+    }
   }
 
   setTurn(turnId: string): void {
@@ -117,6 +151,13 @@ export class CodexStream implements AsyncIterable<TurnResult> {
     this.waiters = [];
     for (const waiter of waiters) {
       waiter(result);
+    }
+  }
+
+  _pushTool(tool: ToolCall): void {
+    this.tools.set(tool.id, tool);
+    for (const waiter of this.toolWaiters) {
+      waiter(tool);
     }
   }
 }
@@ -299,30 +340,94 @@ export class CodexClient extends EventEmitter<EventMap> {
 
   private handleNotification(notif: ServerNotification): void {
     const method = notif.method as string;
-    const params = notif.params;
+    const params = notif.params as any;
 
     this.emit("message", { method, params });
 
     switch (method) {
       case "turn/started":
-        this.currentStream?.setTurn((params as any).turn?.id);
+        this.currentStream?.setTurn(params.turn?.id);
         this.emit("turnStarted", params);
         break;
       case "turn/completed":
-        this.currentStream?._push({ turnId: "", status: (params as any).turn?.status ?? "completed", text: "", final: true });
+        this.currentStream?._push({ turnId: "", status: params.turn?.status ?? "completed", text: "", final: true });
         this.emit("turnCompleted", params);
         break;
       case "item/agentMessage/delta":
-        this.currentStream?._push({ turnId: "", status: "inProgress", text: (params as any).delta ?? "", final: false });
+        this.currentStream?._push({ turnId: "", status: "inProgress", text: params.delta ?? "", final: false });
+        this.emit("messageDelta", params.delta ?? "");
         break;
       case "item/commandExecution/outputDelta":
+        this.emit("commandOutput", params.text ?? "");
+        break;
+      case "item/mcpToolCall/started":
+        const mcpToolStart: ToolCall = {
+          id: params.call_id,
+          type: "mcp",
+          name: params.invocation?.tool,
+          arguments: params.invocation?.arguments,
+          status: "started",
+        };
+        this.currentStream?._pushTool(mcpToolStart);
+        this.emit("toolCallStarted", mcpToolStart);
+        break;
+      case "item/mcpToolCall/completed":
+        const mcpToolResult = params.result;
+        let mcpToolEnd: ToolCall;
+        if ("Ok" in mcpToolResult) {
+          mcpToolEnd = {
+            id: params.call_id,
+            type: "mcp",
+            name: params.invocation?.tool,
+            arguments: params.invocation?.arguments,
+            result: mcpToolResult.Ok,
+            status: "completed",
+            duration: params.duration,
+          };
+        } else {
+          mcpToolEnd = {
+            id: params.call_id,
+            type: "mcp",
+            name: params.invocation?.tool,
+            arguments: params.invocation?.arguments,
+            result: mcpToolResult.Err,
+            status: "error",
+            duration: params.duration,
+          };
+        }
+        this.currentStream?._pushTool(mcpToolEnd);
+        this.emit("toolCallCompleted", mcpToolEnd);
+        break;
+      case "item/dynamicToolCall/started":
+        const dynamicToolStart: ToolCall = {
+          id: params.callId,
+          type: "dynamic",
+          name: params.tool,
+          arguments: params.arguments,
+          status: "started",
+        };
+        this.currentStream?._pushTool(dynamicToolStart);
+        this.emit("toolCallStarted", dynamicToolStart);
+        break;
+      case "item/dynamicToolCall/completed":
+        const dynamicToolEnd: ToolCall = {
+          id: params.callId,
+          type: "dynamic",
+          name: params.tool,
+          arguments: params.arguments,
+          result: params.result,
+          status: "completed",
+        };
+        this.currentStream?._pushTool(dynamicToolEnd);
+        this.emit("toolCallCompleted", dynamicToolEnd);
         break;
       case "item/commandExecution/requestApproval":
       case "item/fileChange/requestApproval":
+        this.emit("approvalRequest", params);
         break;
       case "error":
-        const error: CodexError = new Error((params as any).error?.message ?? "Unknown error");
-        error.code = (params as any).error?.code;
+        const error: CodexError = new Error(params.error?.message ?? "Unknown error");
+        error.code = params.error?.code;
         this.emit("error", error);
         break;
     }

@@ -160,10 +160,11 @@ console.log(result.text);
 |--------|---------|-------------|
 | `[Symbol.asyncIterator]` | `AsyncIterator<TextDelta>` | Iterate text chunks |
 | `fullText` | `string` | Accumulated text |
-| `commandOutputs` | `CommandOutput[]` | All command outputs |
 | `isComplete` | `boolean` | Check if finished |
 | `waitForComplete()` | `Promise<TurnResult>` | Wait for completion |
-| `onText(callback)` | `void` | Register text handler |
+| `toolCalls` | `ToolCall[]` | All tool calls |
+| `getTool(id)` | `ToolCall` | Get specific tool |
+| `onToolCall(callback)` | `void` | Register tool handler |
 
 ### With Custom Thread
 
@@ -240,6 +241,56 @@ client.on("approval.request", async (params) => {
 - `command.output` - Command output received
 - `command.completed` - Command completed
 - `approval.request` - Approval requested
+- `toolCallStarted` - Tool call started (MCP or dynamic)
+- `toolCallCompleted` - Tool call completed
+
+### Tool Streaming
+
+Track MCP tool calls and dynamic tools as they execute:
+
+```typescript
+const { textStream } = await thread.send("Use the GitHub MCP to get recent PRs");
+
+// Iterate text
+for await (const part of textStream) {
+  process.stdout.write(part.text);
+}
+
+// Track tools via CodexStream
+textStream.onToolCall((tool) => {
+  console.log(`Tool: ${tool.name}`, tool.status);
+  if (tool.result) {
+    console.log("Result:", tool.result);
+  }
+});
+
+// Or via events
+client.on("toolCallStarted", (tool) => {
+  console.log("Started:", tool.name);
+});
+
+client.on("toolCallCompleted", (tool) => {
+  console.log("Completed:", tool.name, tool.result);
+});
+
+// Get all tools after completion
+const result = await textStream.waitForComplete();
+console.log("All tools:", result.toolCall);
+```
+
+**ToolCall Type:**
+
+```typescript
+interface ToolCall {
+  id: string;
+  type: "mcp" | "command" | "dynamic";
+  name: string;
+  arguments?: any;
+  result?: any;
+  status: "started" | "completed" | "error";
+  duration?: string;
+}
+```
 
 ### Connection State
 
@@ -301,7 +352,68 @@ await client.interrupt();
 ### List Skills
 
 ```typescript
-const skills = await client.skills({ cwd: process.cwd() });
+const skills = await client.listSkills({ cwd: process.cwd() });
+```
+
+**Response:**
+
+```typescript
+{
+  skills: [
+    {
+      cwd: "/path/to/project",
+      skills: [
+        {
+          name: "skill-creator",
+          description: "Create or update a Codex skill",
+          path: "/home/user/.codex/skills/skill-creator/SKILL.md",
+          scope: "user",
+          enabled: true,
+          interface: {
+            displayName: "Skill Creator",
+            shortDescription: "Create or update a Codex skill"
+          },
+          dependencies: {
+            tools: [
+              { type: "env_var", value: "GITHUB_TOKEN", description: "GitHub API token" },
+              { type: "mcp", value: "github", transport: "streamable_http", url: "..." }
+            ]
+          }
+        }
+      ],
+      errors: []
+    }
+  ]
+}
+```
+
+### Enable/Disable Skill
+
+```typescript
+// Disable a skill
+await client.setSkillEnabled("/home/user/.codex/skills/skill-creator/SKILL.md", false);
+
+// Re-enable
+await client.setSkillEnabled("/home/user/.codex/skills/skill-creator/SKILL.md", true);
+```
+
+### Invoke a Skill
+
+To use a skill, include `$<skill-name>` in your message and add a skill input item:
+
+```typescript
+const { textStream } = await thread.send([
+  { type: "text", text: "$skill-creator Add a new skill for triaging flaky CI." },
+  { type: "skill", name: "skill-creator", path: "/home/user/.codex/skills/skill-creator/SKILL.md" }
+]);
+```
+
+Or just reference it in text (less reliable):
+
+```typescript
+const { textStream } = await thread.send(
+  "$skill-creator Create a new skill that does X"
+);
 ```
 
 ### Get Config
